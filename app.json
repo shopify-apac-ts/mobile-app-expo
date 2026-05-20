@@ -1,17 +1,19 @@
 {
   "expo": {
-    "name": "mobile-app-expo",
+    "name": "Dev Nobu Beer Store",
     "slug": "mobile-app-expo",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
-    "scheme": "mobileappexpo",
+    "scheme": "shop.69800525996.app",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.devnobu.beerstore"
     },
     "android": {
+      "package": "com.devnobu.beerstore",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
@@ -27,6 +29,7 @@
     },
     "plugins": [
       "expo-router",
+      "expo-secure-store",
       [
         "expo-splash-screen",
         {

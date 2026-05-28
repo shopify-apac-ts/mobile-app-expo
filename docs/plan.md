@@ -1,152 +1,247 @@
 # Shopify ストア × Expo モバイルアプリ MVP 構築プラン
 
+> このドキュメントは MVP を実装した上で、当初プランからの変更点を反映した「現状版」です。
+> 当初プランからの主な逸脱には **[変更]** マークを付けています。
+
 ## Context
 
-`dev-nobu-beer-store.myshopify.com` に接続する iOS / Android アプリを React Native / Expo で新規構築する。作業ディレクトリ `/Users/nobu/dev/shopify/mobile/mobile-app-expo` は現状空。
+`dev-nobu-beer-store.myshopify.com` に接続する iOS / Android アプリを React Native / Expo で新規構築する。作業ディレクトリ `/Users/nobu/dev/shopify/mobile/mobile-app-expo`。
 
-**MVP スコープ**:
+**MVP スコープ（完成済み）**:
 1. Customer Account API（OAuth 2.0 + PKCE、Public/Mobile クライアント）でログイン
 2. ログイン状態（未ログイン / ログイン中）をアプリ全体で表示
 3. ログイン顧客は、プロファイル閲覧と、氏名・住所の編集が可能
-4. トップページで全商品の閲覧・キーワード検索・カート追加
-5. Storefront Cart API でカート作成・商品追加・変更・削除
+4. **[変更]** 住所は閲覧・編集に加え、**追加** も可能（47 都道府県ピッカー付き）
+5. トップページで全商品の閲覧・キーワード検索・カート追加
+6. Storefront Cart API でカート作成・商品追加・変更・削除
+7. ログイン後のカート引き継ぎ（buyerIdentity リンク）
 
-**アーキテクチャ（ユーザー予想どおり 2 つのコンポーネント）**:
+**アーキテクチャ（当初予想どおり 2 つのコンポーネント）**:
 - **Shopify 側**: Headless チャンネルをインストールし、Storefront API のパブリックトークンと、Customer Account API の Public/Mobile クライアントを設定。
 - **Expo アプリ側**: Storefront API（パブリックトークン、商品・カート）と Customer Account API（OAuth トークン、顧客データ）の 2 系統 GraphQL クライアントを使い分ける。
 
-**確定した技術選定**: TypeScript / Expo Router / TanStack Query + graphql-request / NativeWind / expo-auth-session + expo-secure-store。
+**技術選定（実装後の確定版）**:
+- TypeScript / Expo Router / TanStack Query + graphql-request
+- **[変更]** スタイリング: NativeWind は採用せず、`lib/theme.ts` の Horizon デザイントークン + RN `style` props で実装（詳細は Phase 3 参照）
+- フォント: `@expo-google-fonts/noto-sans-jp`
+- 認証: `expo-web-browser` の `openAuthSessionAsync` + 自前 PKCE（`expo-crypto`）+ `expo-secure-store`
 
 ---
 
 ## Phase 1 — Shopify ストア側のセットアップ（管理画面で実施）
 
-実装前に手作業で完了させる。後続フェーズはここで取得した値（`shop_id`、`client_id`、Storefront パブリックトークン）に依存する。
-
 1. **Customer Accounts を有効化**: Settings → Customer accounts → "New customer accounts" を有効化。
-2. **Headless チャンネルをインストール**: App Store から Headless チャンネルを追加し、ストアフロントを 1 つ作成（例: "mobile-app"）。
-3. **Storefront API トークン**: Headless → 該当ストアフロント → Storefront API → "Public access token" を発行。商品閲覧と Cart 操作に必要な scopes を有効化（`unauthenticated_read_product_listings`, `unauthenticated_read_product_inventory`, `unauthenticated_write_checkouts`, `unauthenticated_read_checkouts` など）。
+2. **Headless チャンネルをインストール**: App Store から Headless チャンネルを追加し、ストアフロントを 1 つ作成。
+3. **Storefront API トークン**: Headless → 該当ストアフロント → Storefront API → "Public access token" を発行。
 4. **Customer Account API クライアント作成**:
    - クライアントタイプを **Public**（モバイル）に設定。
-   - **Callback URI** にカスタムスキームを登録: `shop.{shop_id}.app://callback`（`shop.{shop_id}.*` 形式は Shopify 必須。`.app` の部分は自由命名で、`app.json` の scheme と完全一致させる）。
-   - **Javascript Origin** にも同じスキーム値（または任意のオリジン値）を登録。これがないとトークンエンドポイントが `invalid_token` で 401 を返す。
-   - Scopes: `openid email customer-account-api:full`。
-5. **`shop_id` の取得**: Customer Account API の設定ページに client_id と並んで表示される（discovery エンドポイントには含まれない）。控えておく。
+   - **Callback URI** に `shop.{shop_id}.app://callback`。`shop.{shop_id}.*` 形式は必須。`.app` の部分は自由、`app.json` の `scheme` と完全一致させる。
+   - **Javascript Origin** にも同じスキーム値を登録。これがないとトークンエンドポイントが 401 を返す。
+   - Scopes: `openid email customer-account-api:full`。`customer-account-api:full` を含めると、OAuth で発行される access_token が **そのまま `shcat_` 形式の Customer Account API トークン** になる（後述 [変更] 参照）。
+5. **`shop_id` の取得**: Customer Account API 設定ページに `client_id` と並んで表示。
 
 ---
 
 ## Phase 2 — Expo プロジェクト初期化
 
-```
+```sh
 cd /Users/nobu/dev/shopify/mobile/mobile-app-expo
-npx create-expo-app@latest . --template default        # TypeScript + expo-router 構成
-npx expo install expo-auth-session expo-crypto expo-web-browser expo-secure-store expo-linking expo-dev-client
-npm i @tanstack/react-query graphql-request graphql
-npm i -D nativewind tailwindcss@^3.4 @types/react
-npx tailwindcss init
+pnpx create-expo-app@latest . --template default
+pnpx expo install --pnpm expo-auth-session expo-crypto expo-web-browser expo-secure-store \
+  expo-linking expo-dev-client expo-font expo-splash-screen
+pnpm add @tanstack/react-query graphql-request graphql @expo-google-fonts/noto-sans-jp
 ```
 
 ### 設定ファイル
 
-- **`app.json`** (重要キーのみ)
+- **`app.json`**
   - `expo.scheme`: `"shop.{shop_id}.app"` ← Customer Account API に登録したスキーム値と完全一致
-  - `expo.ios.bundleIdentifier`, `expo.android.package`: 任意の reverse-DNS
-  - `expo.plugins`: `["expo-router", "expo-secure-store"]`
-- **`.env.local`** (Expo public 変数。バイナリに埋め込まれてよい値のみ)
+  - `expo.ios.bundleIdentifier`: `com.devnobu.beerstore`
+  - `expo.android.package`: `com.devnobu.beerstore`
+  - `expo.plugins`: `["expo-router", "expo-secure-store", ["expo-splash-screen", {...}]]`
+- **`.env.local`** (Expo public 変数)
   - `EXPO_PUBLIC_SHOP_DOMAIN=dev-nobu-beer-store.myshopify.com`
-  - `EXPO_PUBLIC_SHOP_ID=...`
+  - `EXPO_PUBLIC_SHOP_ID=69800525996`
   - `EXPO_PUBLIC_CUSTOMER_ACCOUNT_CLIENT_ID=...`
   - `EXPO_PUBLIC_STOREFRONT_TOKEN=...`（パブリックトークンなので埋め込み OK）
-- **`tailwind.config.js` / `babel.config.js`**: NativeWind v4 公式手順どおりに configure（`babel-preset-expo`、`nativewind/babel`、`metro.config.js` でのトランスフォーマー指定）。
-- **`global.d.ts`**: `import "nativewind/types"` で `className` の型を有効化。
 
-### 重要: Expo Go では動作しない
+### **[変更]** ビルドは EAS ではなく Xcode 直ビルド
 
-`shop.{shop_id}.*` カスタムスキームは `app.json` 経由でネイティブビルドに組み込む必要があるため、Expo Go は使えない。最初から `expo-dev-client` で開発ビルドを作る。
+当初プランでは `eas build --profile development` で配布する想定だったが、実際は EAS を使わず以下のフローで運用:
 
+```sh
+pnpm prebuild:ios                         # ios/ ディレクトリを生成
+pnpm open:ios                             # Xcode で開く
 ```
-eas build --profile development --platform ios    # 初回のみ
-eas build --profile development --platform android
-```
+
+Xcode で:
+1. 開発用 Apple ID で署名（Personal Team でも可）
+2. iPhone を Lightning/USB-C で Mac に接続
+3. Run ボタン（▶︎）でデバイスへ直接インストール
+4. Release ビルドを試す場合は Scheme → Edit Scheme → Run → Build Configuration を **Release** に切り替えてから Run
+
+メリット:
+- EAS のクラウドビルド待ちが不要（数十秒で配布可能）
+- ネイティブ依存（フォント、`expo-secure-store`、Web Browser）の挙動をローカルで即確認できる
+- Metro 開発サーバーは原則使わない（Release ビルドで動かして検証）
+
+### **[変更]** Expo Go は使えない（変更なし）
+
+カスタムスキームと SecureStore を使うため Expo Go では動かない。Xcode 直ビルドの開発ビルドで動かす。
 
 ---
 
-## Phase 3 — ディレクトリ構造と実装
+## Phase 3 — ディレクトリ構造と実装（現状版）
 
 ```
 app/
-  _layout.tsx              QueryClientProvider, AuthProvider, CartProvider, Linking handler
-  index.tsx                商品一覧 + 検索バー（top page）
-  product/[handle].tsx     商品詳細 + 数量選択 + Add to cart
-  cart.tsx                 カート閲覧、数量変更、削除、checkout URL 起動
-  login.tsx                ログイン誘導画面 + ログアウトボタン
+  _layout.tsx                  QueryClientProvider, AuthProvider, CartProvider, フォントロード, SplashScreen 制御
+  index.tsx                    商品一覧 + 検索バー
+  product/[handle].tsx         商品詳細 + 数量選択 + Add to cart
+  cart.tsx                     カート閲覧、数量変更、削除、checkout URL 起動
+  login.tsx                    ログイン誘導画面
   account/
-    _layout.tsx            未ログインなら /login にリダイレクトするガード
-    index.tsx              プロファイル表示（名前・メール・住所一覧）
-    edit.tsx               firstName / lastName 編集
-    addresses/[id].tsx     住所編集フォーム
+    _layout.tsx                未ログインなら /login にリダイレクトするガード
+    index.tsx                  プロファイル + 住所一覧 + 「住所を追加」/ ログアウト
+    edit.tsx                   firstName / lastName 編集
+    addresses/
+      new.tsx                  [追加] 住所新規作成（1 件目は自動で defaultAddress）
+      [id].tsx                 住所編集フォーム
 lib/
+  theme.ts                     [変更] Horizon 3.1.0 デザイントークン（colors / fontFamily / fontSize / spacing / radius / shadow / text presets）
+  constants/
+    prefectures.ts             [追加] ISO 3166-2:JP の 47 都道府県（zoneCode + 漢字名）
   shopify/
-    storefront.ts          graphql-request クライアント（Storefront、X-Shopify-Storefront-Access-Token）
-    customer.ts            graphql-request クライアント（Customer Account、Bearer + Origin + User-Agent ヘッダ、401 retry インターセプタ）
-    discovery.ts           /.well-known/openid-configuration と /.well-known/customer-account-api を起動時に取得・キャッシュ
-    queries.ts             GraphQL 定義（products, search, cart*, customer, customerUpdate, customerAddressUpdate, cartBuyerIdentityUpdate）
-    types.ts               (codegen で生成しても良い)
+    config.ts                  env からの設定値を 1 か所に集約
+    storefront.ts              graphql-request クライアント（Storefront、X-Shopify-Storefront-Access-Token）
+    customer.ts                graphql-request クライアント（Customer Account 用）。ヘッダ要件と 401 リトライ
+    useCustomerClient.ts       AuthContext と customer.ts を繋ぐ React フック
+    discovery.ts               /.well-known/openid-configuration と /.well-known/customer-account-api をキャッシュ
+    queries.ts                 GraphQL 定義
+    types.ts                   TS 型定義（Product / Cart / Customer / CustomerAddress 等）
   auth/
-    oauth.ts               PKCE 実装: code_verifier / code_challenge 生成（expo-crypto.getRandomBytesAsync + SHA-256 + base64url）、authorize URL 構築、exchangeCodeAsync、refreshAsync
-    AuthContext.tsx        accessToken / refreshToken / idToken / expiresAt 状態管理。login(), logout(), refreshIfNeeded() を公開
-    storage.ts             expo-secure-store ラッパー
+    oauth.ts                   PKCE + 認可フロー + リフレッシュ + ログアウト
+    AuthContext.tsx            tokens 状態管理 / login / logout / getAccessToken / 自動リフレッシュ
+    storage.ts                 expo-secure-store ラッパー（tokens + cartId）
   cart/
-    CartContext.tsx        cart_id を SecureStore 永続化、useCart() フック公開、ログイン時に cartBuyerIdentityUpdate でマージ
+    CartContext.tsx            cart_id を SecureStore 永続化、ログイン時に cartBuyerIdentityUpdate でマージ
 components/
-  ProductCard.tsx, ProductList.tsx, SearchBar.tsx, CartLineItem.tsx, AddressForm.tsx, ProfileForm.tsx, LoginStatusBadge.tsx
+  ProductCard.tsx
+  SearchBar.tsx
+  CartLineItem.tsx
+  AddressForm.tsx              [変更] 都道府県ピッカー対応 + KeyboardAvoidingView + ScrollView
+  PrefecturePicker.tsx         [追加] Modal + FlatList で 47 都道府県を選択
+  LoginStatusBadge.tsx         ログイン状態に応じてラベルを切り替えるバッジ
 ```
 
-### 実装上の重要ポイント（Plan エージェント検証の反映）
+### **[変更]** スタイリング: NativeWind は採用せず
 
-1. **Discovery を 2 つ叩く**: OAuth 関連は `https://{shop_domain}/.well-known/openid-configuration`、Customer Account GraphQL エンドポイントは `https://{shop_domain}/.well-known/customer-account-api`（別ドキュメント）。起動時に両方を取得してメモリにキャッシュ。
-2. **必須ヘッダ**: Customer Account API へのリクエストには `Authorization: Bearer <access_token>`、`Origin: <Javascript Origin に登録した値>`、`User-Agent: <任意の識別子>` をすべて付与する。欠けると 401/403。
+当初は NativeWind v4 + Tailwind を想定したが、実装途中で以下の理由から **RN `style` props + `lib/theme.ts` のデザイントークン** に切り替えた:
+
+- Shopify Horizon テーマ（`color-scheme-1` 等）の色・余白・フォントを 1:1 で写し取りたかった → トークン化して `colors.primaryButtonBg` のように参照する方が直感的
+- Noto Sans Japanese を `expo-google-fonts` で読み込み、`fontFamily.regular` のように指定する仕組みが必要
+- NativeWind v4 の `className` 経由だとカスタムフォントの指定で消耗するため、`style={{ fontFamily: fontFamily.regular, ... }}` の方が確実
+
+`lib/theme.ts` は以下を公開:
+- `colors`: Horizon 由来の色（背景、ボーダー、ボタン、入力、ステータス）
+- `fontFamily`: Noto Sans JP の Regular / Medium / Bold
+- `fontSize`, `fontWeight`, `lineHeight`, `radius`, `spacing`, `shadow`
+- `text` プリセット（`h1`〜`h4`, `body`, `label`, `caption`, `price`）
+
+NativeWind / `global.css` / `tailwind.config.js` 自体は依存に残しているが、新規コードでは使っていない（クリーンアップは将来課題）。
+
+### **[変更]** Customer Account API の認証ヘッダ
+
+当初プラン:
+- `Authorization: Bearer <access_token>`
+- RFC 8693 トークン交換で `shcat_` 形式の Customer Account API トークンを取得してから Customer Account GraphQL を叩く
+
+実装:
+- スコープに `customer-account-api:full` を含め、shop-id-scoped なトークンエンドポイントを使うと、OAuth の access_token が **そのまま `shcat_` 形式** で返ってくる
+- このストアの discovery には `grant_types_supported` にトークン交換が含まれていない（= サポートされていない）
+- 結果として **RFC 8693 のトークン交換ステップは不要**、OAuth で得たトークンをそのまま使う
+- ヘッダは Hydrogen の実装に合わせて **`Authorization: <raw shcat_token>`**（`Bearer ` プレフィックスなし）
+- 加えて `Origin: https://shop.{shop_id}.app` と `User-Agent` ヘッダが必須（欠けると 401/403）
+- `AuthContext` は SecureStore に残った旧トークン（`shcat_` で始まらないもの）を起動時に破棄し、再ログインを促す
+
+### 実装上の重要ポイント
+
+1. **Discovery を 2 つ叩く**: OAuth 関連は `https://{shop_domain}/.well-known/openid-configuration`、Customer Account GraphQL エンドポイントは `https://{shop_domain}/.well-known/customer-account-api`。`discovery.graphql_api` には既に `/{version}/graphql` が含まれているので、こちらでバージョンを別途付ける必要はない。
+2. **必須ヘッダ**: 上記のとおり `Authorization: <raw shcat_>` + `Origin` + `User-Agent`。
 3. **PKCE 実装**:
-   - `code_verifier`: `expo-crypto.getRandomBytesAsync(32)` → base64url（`Math.random` は使わない）。
-   - `code_challenge`: SHA-256 を base64url、末尾 `=` 除去・`+`→`-`・`/`→`_`。
-   - `expo-auth-session` の `useAuthRequest({ usePKCE: true, ... })` を使えば内部で処理されるが、ヘッダ要件があるためトークン交換は手書きで `fetch` する方が確実。
+   - `code_verifier`: `expo-crypto.getRandomBytesAsync(32)` → base64url。
+   - `code_challenge`: SHA-256 → base64url（末尾 `=` 除去・`+`→`-`・`/`→`_`）。
+   - `expo-auth-session` の `useAuthRequest` は使わず、`expo-web-browser.openAuthSessionAsync` で開いて自前で URL 構築 + トークン交換 fetch。ヘッダ要件があるため自前の方が確実。
 4. **リフレッシュトークンはローテーション**: トークンエンドポイントは毎回新しい `refresh_token` を返す。SecureStore に上書き保存。古いものを再利用すると `invalid_grant`。
-5. **アクセストークン期限管理**: `expiresAt = Date.now() + expires_in*1000 - 60_000`（60 秒の安全マージン）。`customer.ts` クライアントの request 前にチェックして自動 refresh。並行リクエスト対策として進行中の refresh を Promise でキューイング。
-6. **401 リトライインターセプタ**: refresh 後に元リクエストを 1 回だけリトライ。
-7. **ログアウト**: `end_session_endpoint` に `id_token_hint`（保存済み）と `post_logout_redirect_uri` を付けて WebBrowser で起動し、完了後に SecureStore をクリア。モバイル Public クライアントの場合は 200 OK の API 呼び出しでも可。
-8. **カートとログインの連携**: Customer Account API の `access_token` を直接 Storefront Cart の `buyerIdentity` に渡すことはできない。**トークン交換**で Storefront 互換の `customerAccessToken` を取得してから `cartBuyerIdentityUpdate({ customerAccessToken })` を呼ぶ。
-9. **カートマージ**: ログイン時、匿名 `cart_id` が既にあれば再作成せず `cartBuyerIdentityUpdate` を発行して引き継ぐ。
-10. **GraphQL バージョン固定**: 両 API ともリクエスト URL にバージョン（例 `2025-01`）を明示してピンする。
-11. **エラー正規化**: Storefront は `userErrors` を、Customer Account は `errors`（throttling / cost）+ `userErrors` の両方を返す。共通ハンドラを 1 か所に。
+5. **id_token は初回しか返らない**: リフレッシュ時に `id_token` が省略されるため、`buildTokenSet` で前回値を保持する `fallbackIdToken` を渡す。
+6. **アクセストークン期限管理**: `expiresAt = Date.now() + expires_in*1000 - 60_000`（60 秒の安全マージン）。`AuthContext.refreshIfNeeded` で並行リクエストを Promise でキューイング。
+7. **ログアウト**: `end_session_endpoint` に `id_token_hint` と `post_logout_redirect_uri` を付けて WebBrowser で起動 → SecureStore をクリア。WebBrowser のセッションが何らかの理由で失敗してもローカルのトークンは消える設計。
+8. **カートとログインの連携**: `customer-account-api:full` スコープで得た `shcat_` access_token を **そのまま** `cartBuyerIdentityUpdate({ buyerIdentity: { customerAccessToken } })` に渡せる（当初プランで懸念したトークン交換は不要だった）。
+9. **カートマージ**: `CartContext` の `useEffect` がログイン状態と `cart.buyerIdentity.customer` の欠如を検知して、自動で `cartBuyerIdentityUpdate` を発行。
+10. **エラー正規化**: `customer.ts` の `request` ラッパーで `HTTP {status} | gql=... | message` の形式に整形してから throw。
 
-### Critical files（実装で必ず触る）
+### **[追加]** 住所まわりの実装メモ
 
-- [/Users/nobu/dev/shopify/mobile/mobile-app-expo/app.json](mobile-app-expo/app.json)
-- [/Users/nobu/dev/shopify/mobile/mobile-app-expo/lib/auth/oauth.ts](mobile-app-expo/lib/auth/oauth.ts)
-- [/Users/nobu/dev/shopify/mobile/mobile-app-expo/lib/auth/AuthContext.tsx](mobile-app-expo/lib/auth/AuthContext.tsx)
-- [/Users/nobu/dev/shopify/mobile/mobile-app-expo/lib/shopify/customer.ts](mobile-app-expo/lib/shopify/customer.ts)
-- [/Users/nobu/dev/shopify/mobile/mobile-app-expo/lib/shopify/storefront.ts](mobile-app-expo/lib/shopify/storefront.ts)
-- [/Users/nobu/dev/shopify/mobile/mobile-app-expo/lib/cart/CartContext.tsx](mobile-app-expo/lib/cart/CartContext.tsx)
+実装した順序と背景:
+1. `customerAddressCreate` mutation を queries.ts に追加。
+2. `AddressForm` の `initial` prop をオプショナル化（新規作成モード対応）。
+3. `app/account/addresses/new.tsx` を作成。Expo Router の優先順位（静的 > 動的）により `[id].tsx` と共存可能。
+4. **複数住所への対応**: 1 件目は自動で `defaultAddress: true`、2 件目以降は `null` を送る。
+   ```ts
+   const isFirstAddress = (customer?.addresses.edges.length ?? 0) === 0;
+   ```
+   （Shopify は customer に少なくとも 1 つの default address が無いと、カート/チェックアウトの prefill が空になる）
+5. **キーボード対応**: 当初は普通の `View` に並べていたが、市区町村以降がキーボードで隠れた。`KeyboardAvoidingView` (`behavior="padding"`, `keyboardVerticalOffset={96}`) + `ScrollView` (`keyboardShouldPersistTaps="handled"`, `paddingBottom: 96`) でスクロール可能に。
+6. **`zoneCode`（都道府県）**: Shopify が必須項目として要求。`ISO 3166-2:JP` の `JP-01`〜`JP-47` を `lib/constants/prefectures.ts` で定義し、`PrefecturePicker` (Modal + FlatList、純 JS) で選択 UI を提供。`territoryCode` は `"JP"` でハードコード（日本専売のため）。
+7. 編集画面 `[id].tsx` も同じ `AddressForm` を流用し、`zoneCode` を mutation に流す。
+
+### Critical files（実装で必ず触った）
+
+- [app.json](../app.json)
+- [lib/auth/oauth.ts](../lib/auth/oauth.ts)
+- [lib/auth/AuthContext.tsx](../lib/auth/AuthContext.tsx)
+- [lib/shopify/customer.ts](../lib/shopify/customer.ts)
+- [lib/shopify/storefront.ts](../lib/shopify/storefront.ts)
+- [lib/cart/CartContext.tsx](../lib/cart/CartContext.tsx)
+- [lib/theme.ts](../lib/theme.ts) — [追加]
+- [components/PrefecturePicker.tsx](../components/PrefecturePicker.tsx) — [追加]
+- [components/AddressForm.tsx](../components/AddressForm.tsx)
+- [app/account/addresses/new.tsx](../app/account/addresses/new.tsx) — [追加]
 
 ---
 
-## Phase 4 — 動作検証
+## Phase 4 — 動作検証（実施結果）
 
-各機能を以下の順で確認する。
+| # | 機能 | 結果 |
+|---|------|------|
+| 1 | Xcode → iPhone 直接ビルドで起動 | ✅ |
+| 2 | 商品一覧表示・検索ボックスでの絞り込み | ✅ |
+| 3 | 商品詳細 → カート追加 → カート画面で表示・数量変更・削除 | ✅ |
+| 4 | OAuth ログイン（`shop.{shop_id}.app://callback`）→ `/account` でプロファイル表示 | ✅ |
+| 5 | プロファイル編集（firstName / lastName） | ✅ |
+| 6 | 住所編集（既存 1 件目の更新） | ✅ |
+| 7 | **住所新規追加（[追加]）** — ピッカーで都道府県選択 → 保存 → 一覧に反映 | ✅ |
+| 8 | トークン自動リフレッシュ（並行リクエスト含む） | ✅ |
+| 9 | ログイン後のカート引き継ぎ（`buyerIdentity.customer` リンク） | ✅ |
+| 10 | ログアウト後の SecureStore クリア + `/login` ガード | ✅ |
 
-1. **ビルド起動**: `eas build --profile development` で iOS / Android のいずれかをインストール → `npx expo start --dev-client` で接続。
-2. **商品閲覧と検索**: `app/index.tsx` を開く → 商品が一覧表示される。検索ボックスに文字入力 → 該当商品のみ表示される。
-3. **カート操作**: 商品詳細から「Add to cart」→ `/cart` で表示される。数量変更・削除・カート合計の再計算を確認。
-4. **OAuth ログイン**: `/login` から「Login」→ Shopify ホスト型ログイン画面がブラウザで開く → 認証完了後にアプリへ戻り、`/account` でプロファイル表示。SecureStore に `accessToken`, `refreshToken`, `idToken` が保存されていることを確認。
-5. **プロファイル編集**: `/account/edit` で firstName / lastName を変更 → mutation 成功 → 再取得で反映確認。
-6. **住所編集**: `/account/addresses/[id]` で住所更新 → 反映確認。
-7. **トークンリフレッシュ**: `expiresAt` を強制的に過去にして再リクエスト → 自動 refresh → 元リクエスト成功を確認。`refreshToken` が SecureStore で更新されていることも確認。
-8. **ログイン後カート引き継ぎ**: 未ログインでカートに 1 件追加 → ログイン → `cart.buyerIdentity.customer` が紐づくことを確認。
-9. **ログアウト**: ログアウト後 SecureStore がクリアされ、`/account` がガードで `/login` に飛ばされることを確認。
+---
+
+## 残課題 / 将来作業
+
+- NativeWind / Tailwind の依存を `package.json` から削除（現状未使用）
+- 国際化対応（現状は日本専売前提で `territoryCode = "JP"` 固定、`zoneCode` も日本のみ）
+- 住所削除 UI（`customerAddressDelete` mutation の追加）
+- デフォルト住所の切り替え UI（現状は 1 件目だけ自動 default）
+- Android Studio での Android ネイティブビルド検証（現状は iPhone のみ確認）
+- `zoneCode` のフォーマット検証（`JP-13` で動いているが、Shopify 側の仕様変更で `"13"` を要求するケースがあれば対応）
+
+---
 
 参考ドキュメント:
 - [Customer Account API リファレンス](https://shopify.dev/docs/api/customer/latest)
 - [Customer Account API 認証フロー](https://shopify.dev/docs/storefronts/headless/building-with-the-customer-account-api/authenticate-customers)
 - [Storefront API リファレンス](https://shopify.dev/docs/api/storefront/latest)
-- [cartLinesRemove ほか Cart mutations](https://shopify.dev/docs/api/storefront/latest/mutations/cartLinesRemove)
-- [Expo AuthSession](https://docs.expo.dev/versions/latest/sdk/auth-session/)
+- [Hydrogen の Customer Account クライアント実装](https://github.com/Shopify/hydrogen/blob/main/packages/hydrogen/src/customer/customer.ts) — `Authorization` ヘッダの Bearer なし扱いの根拠
+- [ISO 3166-2:JP](https://ja.wikipedia.org/wiki/ISO_3166-2:JP)
+- [Expo SDK 54 — Documentation](https://docs.expo.dev/versions/v54.0.0/)

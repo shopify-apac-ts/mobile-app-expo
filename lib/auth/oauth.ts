@@ -19,14 +19,23 @@ export class AuthCancelledError extends Error {
 
 const base64urlEncode = (buf: ArrayBuffer | Uint8Array): string => {
   const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
-  let binary = "";
-  for (const b of bytes) binary += String.fromCharCode(b);
-  return (
-    (typeof btoa !== "undefined" ? btoa(binary) : Buffer.from(binary, "binary").toString("base64"))
-      .replace(/\+/g, "-")
-      .replace(/\//g, "_")
-      .replace(/=+$/, "")
-  );
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  let base64 = "";
+
+  for (let i = 0; i < bytes.length; i += 3) {
+    const a = bytes[i];
+    const b = bytes[i + 1];
+    const c = bytes[i + 2];
+    const hasB = i + 1 < bytes.length;
+    const hasC = i + 2 < bytes.length;
+
+    base64 += alphabet[a >> 2];
+    base64 += alphabet[((a & 0x03) << 4) | ((b ?? 0) >> 4)];
+    base64 += hasB ? alphabet[((b & 0x0f) << 2) | ((c ?? 0) >> 6)] : "=";
+    base64 += hasC ? alphabet[(c ?? 0) & 0x3f] : "=";
+  }
+
+  return base64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 };
 
 const generateCodeVerifier = async (): Promise<string> => {
